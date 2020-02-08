@@ -31,6 +31,7 @@ var analyser = null;
 var theBuffer = null;
 var DEBUGCANVAS = null;
 var mediaStreamSource = null;
+var previousDecible = 0
 var detectorElem, 
 	canvasElem,
 	waveCanvas,
@@ -42,15 +43,6 @@ var detectorElem,
 window.onload = function() {
 	audioContext = new AudioContext();
 	MAX_SIZE = Math.max(4,Math.floor(audioContext.sampleRate/5000));	// corresponds to a 5kHz signal
-	var request = new XMLHttpRequest();
-	request.open("GET", "../sounds/whistling3.ogg", true);
-	request.responseType = "arraybuffer";
-	request.onload = function() {
-	  audioContext.decodeAudioData( request.response, function(buffer) { 
-	    	theBuffer = buffer;
-		} );
-	}
-	request.send();
 
 	detectorElem = document.getElementById( "detector" );
 	canvasElem = document.getElementById( "output" );
@@ -89,8 +81,78 @@ window.onload = function() {
 	};
 
 
-
+	loadSheet()
 }
+
+var abc = "T: Cooley's\n" +
+	"M: 4/4\n" +
+	"L: 1/8\n" +
+	"R: reel\n" +
+	"K: Emin\n" +
+	"|:D2|EB{c}BA B2 EB|~B2 AB dBAG|FDAD BDAD|FDAD dAFD|\n" +
+	"E";
+
+function loadSheet(abc) {
+	ABCJS.renderAbc("paper", abc);
+}
+
+function volumeAudioProcess( event ) {
+	var buf = event.inputBuffer.getChannelData(0);
+	var bufLength = buf.length;
+	var sum = 0;
+	var x;
+
+	// Do a root-mean-square on the samples: sum up the squares...
+	for (var i=0; i<bufLength; i++) {
+		x = buf[i];
+		if (Math.abs(x)>=this.clipLevel) {
+			this.clipping = true;
+			this.lastClip = window.performance.now();
+		}
+		sum += x * x;
+	}
+
+	// ... then take the square root of the sum.
+	var rms =  Math.sqrt(sum / bufLength);
+
+	// Now smooth this out with the averaging factor applied
+	// to the previous sample - take the max here because we
+	// want "fast attack, slow release."
+	this.volume = Math.max(rms, this.volume*this.averaging);
+}
+
+function createAudioMeter(audioContext,clipLevel,averaging,clipLag) {
+	var processor = audioContext.createScriptProcessor(512);
+	processor.onaudioprocess = volumeAudioProcess;
+	processor.clipping = false;
+	processor.lastClip = 0;
+	processor.volume = 0;
+	processor.clipLevel = clipLevel || 0.98;
+	processor.averaging = averaging || 0.95;
+	processor.clipLag = clipLag || 750;
+
+	// this will have no effect, since we don't copy the input to the output,
+	// but works around a current Chrome bug.
+	processor.connect(audioContext.destination);
+
+	processor.checkClipping =
+		function(){
+			if (!this.clipping)
+				return false;
+			if ((this.lastClip + this.clipLag) < window.performance.now())
+				this.clipping = false;
+			return this.clipping;
+		};
+
+	processor.shutdown =
+		function(){
+			this.disconnect();
+			this.onaudioprocess = null;
+		};
+
+	return processor;
+}
+
 
 function error() {
     alert('Stream generation failed.');
@@ -116,33 +178,12 @@ function gotStream(stream) {
     analyser = audioContext.createAnalyser();
     analyser.fftSize = 2048;
     mediaStreamSource.connect( analyser );
-    updatePitch();
-}
 
-function toggleOscillator() {
-    if (isPlaying) {
-        //stop playing and return
-        sourceNode.stop( 0 );
-        sourceNode = null;
-        analyser = null;
-        isPlaying = false;
-		if (!window.cancelAnimationFrame)
-			window.cancelAnimationFrame = window.webkitCancelAnimationFrame;
-        window.cancelAnimationFrame( rafID );
-        return "play oscillator";
-    }
-    sourceNode = audioContext.createOscillator();
 
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-    sourceNode.connect( analyser );
-    analyser.connect( audioContext.destination );
-    sourceNode.start(0);
-    isPlaying = true;
-    isLiveInput = false;
-    updatePitch();
+	meter = createAudioMeter(audioContext);
+	mediaStreamSource.connect(meter);
 
-    return "stop";
+	updatePitch(meter.volume);
 }
 
 function toggleLiveInput() {
@@ -160,10 +201,10 @@ function toggleLiveInput() {
     	{
             "audio": {
                 "mandatory": {
-                    "googEchoCancellation": "false",
-                    "googAutoGainControl": "false",
-                    "googNoiseSuppression": "false",
-                    "googHighpassFilter": "false"
+                    "googEchoCancellation": "true",
+                    "googAutoGainControl": "true",
+                    "googNoiseSuppression": "true",
+                    "googHighpassFilter": "true"
                 },
                 "optional": []
             },
@@ -194,21 +235,22 @@ function togglePlayback() {
     sourceNode.start( 0 );
     isPlaying = true;
     isLiveInput = false;
-    updatePitch();
+    updatePitch(analyser.maxDecibels);
 
     return "stop";
 }
 
 var rafID = null;
 var tracks = null;
-var buflen = 1024;
+var buflen = 2048;
 var buf = new Float32Array( buflen );
+var bufInt = new Uint8Array(buflen)
 
 var noteStrings = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 function noteFromPitch( frequency ) {
-	var noteNum = 12 * (Math.log( frequency / 440 )/Math.log(2) );
-	return Math.round( noteNum ) + 69;
+	var noteNum = 12 * (Math.log( frequency / 65.41 )/Math.log(2) );
+	return Math.round( noteNum );
 }
 
 function frequencyFromNoteNumber( note ) {
@@ -313,10 +355,66 @@ function autoCorrelate( buf, sampleRate ) {
 //	var best_frequency = sampleRate/best_offset;
 }
 
-function updatePitch( time ) {
+function getNote(note) {
+
+		return noteStrings[note%12] + Math.floor(Math.floor(note/12) + 2)
+}
+
+
+function autoCorrelate1( buf, sampleRate ) {
+	// Implements the ACF2+ algorithm
+	var SIZE = buf.length;
+	var rms = 0;
+
+	for (var i=0;i<SIZE;i++) {
+		var val = buf[i];
+		rms += val*val;
+	}
+	rms = Math.sqrt(rms/SIZE);
+	if (rms<0.01) // not enough signal
+		return -1;
+
+	var r1=0, r2=SIZE-1, thres=0.2;
+	for (var i=0; i<SIZE/2; i++)
+		if (Math.abs(buf[i])<thres) { r1=i; break; }
+	for (var i=1; i<SIZE/2; i++)
+		if (Math.abs(buf[SIZE-i])<thres) { r2=SIZE-i; break; }
+
+	buf = buf.slice(r1,r2);
+	SIZE = buf.length;
+
+	var c = new Array(SIZE).fill(0);
+	for (var i=0; i<SIZE; i++)
+		for (var j=0; j<SIZE-i; j++)
+			c[i] = c[i] + buf[j]*buf[j+i];
+
+	var d=0; while (c[d]>c[d+1]) d++;
+	var maxval=-1, maxpos=-1;
+	for (var i=d; i<SIZE; i++) {
+		if (c[i] > maxval) {
+			maxval = c[i];
+			maxpos = i;
+		}
+	}
+	var T0 = maxpos;
+
+	var x1=c[T0-1], x2=c[T0], x3=c[T0+1];
+	a = (x1 + x3 - 2*x2)/2;
+	b = (x3 - x1)/2;
+	if (a) T0 = T0 - b/(2*a);
+
+	return sampleRate/T0;
+}
+
+function updatePitch( decibles) {
+
+
 	var cycles = new Array;
 	analyser.getFloatTimeDomainData( buf );
-	var ac = autoCorrelate( buf, audioContext.sampleRate );
+
+	var vol = 0
+
+	var ac = autoCorrelate1( buf, audioContext.sampleRate );
 	// TODO: Paint confidence meter on canvasElem here.
 
 	if (DEBUGCANVAS) {  // This draws the current waveform, useful for debugging
@@ -343,7 +441,17 @@ function updatePitch( time ) {
 		waveCanvas.stroke();
 	}
 
- 	if (ac == -1) {
+	if(meter != null) {
+		if (meter.checkClipping()) {
+			//console.warn(meter.volume);
+		} else {
+			//console.log(meter.volume);
+		}
+		vol = meter.volume
+	}
+	console.log(vol)
+
+ 	if (ac == -1 || vol < 0.10) {
  		detectorElem.className = "vague";
 	 	pitchElem.innerText = "--";
 		noteElem.innerText = "-";
@@ -354,7 +462,16 @@ function updatePitch( time ) {
 	 	pitch = ac;
 	 	pitchElem.innerText = Math.round( pitch ) ;
 	 	var note =  noteFromPitch( pitch );
-		noteElem.innerHTML = noteStrings[note%12];
+		noteElem.innerHTML = getNote(note);
+		abc += getNote(note)
+		loadSheet(abc)
+
+		pitchElem.innerHTML = " decibles - " + decibles
+
+		//console.log(audioContext)
+
+
+
 		var detune = centsOffFromPitch( pitch, note );
 		if (detune == 0 ) {
 			detuneElem.className = "";
@@ -367,6 +484,7 @@ function updatePitch( time ) {
 			detuneAmount.innerHTML = Math.abs( detune );
 		}
 	}
+
 
 	if (!window.requestAnimationFrame)
 		window.requestAnimationFrame = window.webkitRequestAnimationFrame;
