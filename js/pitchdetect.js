@@ -39,9 +39,23 @@ var detectorElem,
 	noteElem,
 	detuneElem,
 	detuneAmount;
+var div
+var VF
+var container
+var renderer
+var context
+var voices
+var formatter
+var notes = [[]]
+var width
+var staves
+var stave
+var isBar = false
+var vexWidth = 700
 
 window.onload = function() {
 	audioContext = new AudioContext();
+	VF = Vex.Flow;
 	MAX_SIZE = Math.max(4,Math.floor(audioContext.sampleRate/5000));	// corresponds to a 5kHz signal
 
 	detectorElem = document.getElementById( "detector" );
@@ -93,7 +107,7 @@ var abc = "T: Cooley's\n" +
 	"E";
 
 function loadSheet(abc) {
-	ABCJS.renderAbc("paper", abc);
+	//ABCJS.renderAbc("paper", abc);
 }
 
 function volumeAudioProcess( event ) {
@@ -261,42 +275,6 @@ function centsOffFromPitch( frequency, note ) {
 	return Math.floor( 1200 * Math.log( frequency / frequencyFromNoteNumber( note ))/Math.log(2) );
 }
 
-// this is a float version of the algorithm below - but it's not currently used.
-/*
-function autoCorrelateFloat( buf, sampleRate ) {
-	var MIN_SAMPLES = 4;	// corresponds to an 11kHz signal
-	var MAX_SAMPLES = 1000; // corresponds to a 44Hz signal
-	var SIZE = 1000;
-	var best_offset = -1;
-	var best_correlation = 0;
-	var rms = 0;
-
-	if (buf.length < (SIZE + MAX_SAMPLES - MIN_SAMPLES))
-		return -1;  // Not enough data
-
-	for (var i=0;i<SIZE;i++)
-		rms += buf[i]*buf[i];
-	rms = Math.sqrt(rms/SIZE);
-
-	for (var offset = MIN_SAMPLES; offset <= MAX_SAMPLES; offset++) {
-		var correlation = 0;
-
-		for (var i=0; i<SIZE; i++) {
-			correlation += Math.abs(buf[i]-buf[i+offset]);
-		}
-		correlation = 1 - (correlation/SIZE);
-		if (correlation > best_correlation) {
-			best_correlation = correlation;
-			best_offset = offset;
-		}
-	}
-	if ((rms>0.1)&&(best_correlation > 0.1)) {
-		console.log("f = " + sampleRate/best_offset + "Hz (rms: " + rms + " confidence: " + best_correlation + ")");
-	}
-//	var best_frequency = sampleRate/best_offset;
-}
-*/
-
 var MIN_SAMPLES = 0;  // will be initialized when AudioContext is created.
 var GOOD_ENOUGH_CORRELATION = 0.9; // this is the "bar" for how close a correlation needs to be
 
@@ -357,7 +335,7 @@ function autoCorrelate( buf, sampleRate ) {
 
 function getNote(note) {
 
-		return noteStrings[note%12] + Math.floor(Math.floor(note/12) + 2)
+		return [noteStrings[note%12],  Math.floor(Math.floor(note/12) + 2)]
 }
 
 
@@ -462,9 +440,14 @@ function updatePitch( decibles) {
 	 	pitch = ac;
 	 	pitchElem.innerText = Math.round( pitch ) ;
 	 	var note =  noteFromPitch( pitch );
-		noteElem.innerHTML = getNote(note);
-		abc += getNote(note)
-		loadSheet(abc)
+	 	var noteWithOctave = getNote(note);
+	 	note = noteWithOctave[0]
+		var octave = noteWithOctave[1]
+		noteElem.innerHTML = note + octave
+		//abc += getNote(note)
+		//loadSheet(abc)
+		addNotes(note, octave, 4)
+		drawWithVex()
 
 		pitchElem.innerHTML = " decibles - " + decibles
 
@@ -486,7 +469,91 @@ function updatePitch( decibles) {
 	}
 
 
-	if (!window.requestAnimationFrame)
-		window.requestAnimationFrame = window.webkitRequestAnimationFrame;
-	rafID = window.requestAnimationFrame( updatePitch );
+
+
+	setTimeout(function() {
+		if (!window.requestAnimationFrame)
+			window.requestAnimationFrame = window.webkitRequestAnimationFrame;
+		rafID = window.requestAnimationFrame( updatePitch );
+	}, 1000);
+}
+
+
+
+function initVexflow() {
+	div = document.getElementById('paper');
+	container = $(div);
+
+	voices = [
+		new VF.Voice({num_beats:4, beat_value: 4, resolution: VF.RESOLUTION})
+	];
+	voices[0].setStrict(false);
+	formatter = new VF.Formatter();
+}
+
+
+
+function drawWithVex() {
+	initVexflow()
+	container.empty();
+	renderer = new VF.Renderer(container[0], VF.Renderer.Backends.SVG);
+	renderer.resize(vexWidth, 400);
+	context = renderer.getContext();
+	context.setFont('Arial', 10, '').setBackgroundFillStyle('#eed');
+	voices[0].addTickables(notes[0]);
+	formatter.preCalculateMinTotalWidth(voices);
+	width = formatter.getMinTotalWidth();
+	vexWidth += width*3
+	staves = [
+		new VF.Stave(30, 30, width*3)
+	];
+
+	stave = {
+		timeSig: {
+			n: 4,
+			d: 4,
+		},
+		key: {
+			keyName: 'Bb'
+		}
+	};
+
+	staves[0].addClef('treble', 'default', '8vb').addTimeSignature(stave.timeSig.n + '/' + stave.timeSig.d).setKeySignature(stave.key.keyName);
+
+	formatter.formatToStave(voices, staves[0]);
+
+	staves[0].setContext(context).draw();
+
+	voices[0].draw(context, staves[0]);
+
+}
+
+function addNotes(note, octave, duration) {
+	// notes = [
+	// 	[
+	// 		new VF.StaveNote({keys: ["c/4"], duration: '2', auto_stem: true}),
+	// 		new VF.StaveNote({keys: ["e/5"], duration: '4', auto_stem: true}),
+	// 		new VF.BarNote(Vex.Flow.Barline.type.SINGLE),
+	// 		new VF.StaveNote({keys: ["f/5"], duration: '2', auto_stem: true}),
+	// 		new VF.StaveNote({keys: ["d/5"], duration: '4', auto_stem: true}),
+	// 		new VF.StaveNote({keys: ["f/5"], duration: '4', auto_stem: true})
+	// 	]
+	// ];
+
+	if (isSharp(note)) {
+		notes[0].push(new VF.StaveNote({keys: [note + "/" + octave], duration: duration.toString() , auto_stem: true}).addAccidental(0, new VF.Accidental('#')))
+	}
+	else if (isBar) {
+		notes[0].push(new VF.BarNote(Vex.Flow.Barline.type.SINGLE))
+		isBar = false
+	}
+	else
+		notes[0].push(new VF.StaveNote({keys: [note + "/" + octave], duration: duration.toString() , auto_stem: true}))
+}
+
+function isSharp(note) {
+	if (note.length == 2)
+		return true
+	else
+		return false
 }
